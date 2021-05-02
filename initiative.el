@@ -5,6 +5,7 @@
 ;;; Code:
 
 (require 'subr-x)
+(require 'cl-lib)
 
 (defvar initiative-combatants '()
   "A list of combantants.
@@ -80,13 +81,29 @@ Form: '((NAME INITIATIVE HEALTH ENEMY) ...).")
   "Advances the initiative order."
   (interactive)
   (push 'initiative-advance initiative-history)
-  (setf initiative-current-turn (mod (1+ initiative-current-turn)
-                                     (length initiative-combatants)))
+  (cl-labels
+      ((advance ()
+                (setf initiative-current-turn (mod (1+ initiative-current-turn)
+                                                   (length initiative-combatants)))))
+    (advance)
+    (let ((count 0))
+      (while (<= (nth 2 (nth initiative-current-turn initiative-combatants)) 0)
+        (when (>= count (length initiative-combatants))
+          (error "Could not find a next combatant"))
+        (cl-incf count)
+        (advance))))
   (initiative-draw))
 
 (defun initiative-damage ()
   "Damage a combatant."
   (interactive)
+  (let* ((name      (read-string "Name: "))
+         (damage    (read-number "Damage: "))
+         (combatant (find name initiative-combatants :test #'string-equal :key #'car)))
+    (if (null combatant)
+        (error (format "Could not find %s" name))
+      (push (list 'damage name damage) initiative-history)
+      (cl-decf (nth 2 combatant) damage)))
   (initiative-draw))
 
 (define-derived-mode initiative special-mode "Initiative"
