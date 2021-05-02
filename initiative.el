@@ -10,7 +10,7 @@
 (defvar initiative-combatants '()
   "A list of combantants.
 
-Form: '((NAME INITIATIVE HEALTH ENEMY) ...).")
+Form: '((NAME INITIATIVE HEALTH ENEMY SAVES FAILS STABLE DEAD) ...).")
 
 (make-variable-buffer-local 'initiative-combatants)
 
@@ -42,6 +42,7 @@ Form: '((NAME INITIATIVE HEALTH ENEMY) ...).")
 
 (defun initiative-draw ()
   "Draw the current state of `initiative-combatants' to the current buffer."
+  (interactive)
   (progn
     (read-only-mode -1)
     (delete-region (point-min) (point-max))
@@ -49,13 +50,20 @@ Form: '((NAME INITIATIVE HEALTH ENEMY) ...).")
     (insert "==========\n\n")
     (let ((index 0))
       (mapc (lambda (combatant) (pcase combatant
-                                  (`(,name ,initiative ,health ,enemy)
+                                  (`(,name ,initiative ,health ,enemy ,saves ,fails ,stable ,dead)
                                    (progn
-                                     (insert (format "[%s] %s (%s):\t%s\t"
+                                     (insert (format "[%s] %s (%s):\t%s%s\t"
                                                      (if enemy "E" "P")
                                                      name
                                                      initiative
-                                                     health))
+                                                     health
+                                                     (if (and (not enemy) (<= health 0))
+                                                         (format " (Saves: %s, Fails: %s)" saves fails)
+                                                       "")))
+                                     (when (and stable (= health 0))
+                                       (insert "[Stable]"))
+                                     (when dead
+                                       (insert "Dead"))
                                      (when (= index initiative-current-turn)
                                        (insert " <--"))
                                      (insert "\n")
@@ -69,13 +77,17 @@ Form: '((NAME INITIATIVE HEALTH ENEMY) ...).")
          (initiative (read-number "Initiative: "))
          (health     (read-number "Health: "))
          (enemy      (y-or-n-p "Enemy: "))
-         (combatant  (list name initiative health enemy)))
+         (combatant  (list name initiative health enemy 0 0 nil nil)))
     (push (list 'initiative-enter combatant) initiative-history)
     (setf initiative-combatants (thread-first
                                     (cons combatant initiative-combatants)
-                                  (copy-seq)
+                                  (cl-copy-seq)
                                   (sort (lambda (this that) (> (cadr this) (cadr that))))))
     (initiative-draw)))
+
+(defun initiative-current-combatant ()
+  "Produce the current combatant."
+  (nth initiative-current-turn initiative-combatants))
 
 (defun initiative-advance ()
   "Advances the initiative order."
@@ -87,23 +99,68 @@ Form: '((NAME INITIATIVE HEALTH ENEMY) ...).")
                                                    (length initiative-combatants)))))
     (advance)
     (let ((count 0))
-      (while (<= (nth 2 (nth initiative-current-turn initiative-combatants)) 0)
+      (while (or (and (nth 3 (initiative-current-combatant))
+                      (<= (nth 2 (initiative-current-combatant)) 0))
+                 (and (not (nth 3 (initiative-current-combatant)))
+                      (nth 7 (initiative-current-combatant))))
         (when (>= count (length initiative-combatants))
           (error "Could not find a next combatant"))
         (cl-incf count)
         (advance))))
   (initiative-draw))
 
+(defun initiative-fail-save ()
+  "Fail the death save for the current player."
+  (interactive)
+  (let ((combatant (initiative-current-combatant)))
+    (when (nth 3 combatant) (error "Current player is an enemy"))
+    (when (nth 7 combatant) (error "Current player is dead"))
+    (push (list 'fail-save (car combatant)) initiative-history)
+    (cl-incf (nth 5 combatant))
+    (when (= (nth 5 combatant) 3) (setf (nth 7 combatant) t))
+    (initiative-draw)))
+
+(defun initiative-succeed ()
+  "Succeed on a death save for the curretn player."
+  (interactive)
+  (let ((combatant (initiative-current-combatant)))
+    (when (nth 3 combatant) (error "Current player is an enemy"))
+    (when (nth 6 combatant) (error "Current player is stable"))
+    (when (nth 7 combatant) (error "Current player is dead"))
+    (push (list 'succeed-save (car combatant)) initiative-history)
+    (cl-incf (nth 4 combatant))
+    (when (= (nth 4 combatant) 3) (setf (nth 6 combatant) t))
+    (initiative-draw)))
+
 (defun initiative-damage ()
   "Damage a combatant."
   (interactive)
-  (let* ((name      (read-string "Name: "))
+  (let* ((name      (completing-read "Name: " (mapcar #'car initiative-combatants)))
          (damage    (read-number "Damage: "))
-         (combatant (find name initiative-combatants :test #'string-equal :key #'car)))
+         (combatant (cl-find name initiative-combatants :test #'string-equal :key #'car)))
     (if (null combatant)
         (error (format "Could not find %s" name))
       (push (list 'damage name damage) initiative-history)
-      (cl-decf (nth 2 combatant) damage)))
+      (cl-decf (nth 2 combatant) damage)
+      (setf (nth 2 combatant) (max 0 (nth 2 combatant)))
+      (when (and (= 0 (nth 2 combatant)) (nth 3 combatant))
+        (setf (nth 7 combatant) t))))
+  (initiative-draw))
+
+(defun initiative-heal ()
+  "Heal a combatant."
+  (interactive)
+  (let* ((name      (completing-read "Name: " (mapcar #'car initiative-combatants)))
+         (health    (read-number "Health: "))
+         (combatant (cl-find name initiative-combatants :test #'string-equal :key #'car)))
+    (if (null combatant)
+        (error (format "Could not find %s" name))
+      (push (list 'heal name health) initiative-history)
+      (cl-incf (nth 2 combatant) health)
+      (setf (nth 4 combatant) 0
+            (nth 5 combatant) 0
+            (nth 6 combatant) nil
+            (nth 7 combatant) nil)))
   (initiative-draw))
 
 (define-derived-mode initiative special-mode "Initiative"
@@ -112,11 +169,18 @@ Form: '((NAME INITIATIVE HEALTH ENEMY) ...).")
 Key bindings:
  - e: enter initiative.
  - SPC: advance initiative.
- - d: damage.")
+ - d: damage.
+ - s: succeed at a saving throw
+ - f: fail at a saving throw
+ - h: heal a player")
 
 (define-key initiative-map (kbd "e")   #'initiative-enter)
 (define-key initiative-map (kbd "SPC") #'initiative-advance)
 (define-key initiative-map (kbd "d")   #'initiative-damage)
+(define-key initiative-map (kbd "s")   #'initiative-succeed)
+(define-key initiative-map (kbd "f")   #'initiative-fail-save)
+(define-key initiative-map (kbd "h")   #'initiative-heal)
+(define-key initiative-map (kbd "g")   #'initiative-draw)
 
 (provide 'initiative)
 ;;; initiative ends here
